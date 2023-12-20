@@ -19,33 +19,29 @@ class _PlotData:
         self.coeffs = coeffs
         self.data = data
 
+
 class _CrossSection:
 
     SAMPLING_RATE_DEFAULT = 1000
     CUTOFF_FREQUENCY_DEFAULT = 0.50
 
-    def __init__(self, row_start: int, col_start: int, length: int, vertical: bool = False):
+    def __init__(self, index: int, start: int, length: int = 0):
 
         """
         Initialize a CrossSection object
 
-        :param row_start: Starting row-index in a 2D array.
-        :param col_start: Starting col-index in a 2D array.
+        :param start: Starting row-index in a 2D array.
         :param length: Number of pixels to take cross section along.
-        :param vertical: Boolean value - controls whether to take x-section vertically (N-S) or Horizontally (E-W)
         """
         self._data = None
-        self.vertical = vertical
+        self._index = index
+        self._start = start
         self._nodata_value = NODATA
-        self._col_start = col_start
-        self._row_start = row_start
+        self._end = (self._start + length) if length else length
         self._sampling_rate = self.SAMPLING_RATE_DEFAULT
         self._cutoff_frequency = self.CUTOFF_FREQUENCY_DEFAULT
         self._nyquist_sampling_rate = 0.50 * self._sampling_rate
         self._normal_cutoff = self._cutoff_frequency / self._nyquist_sampling_rate
-
-        self._col_end = (self._col_start + length) if not vertical else self._col_start
-        self._row_end = (self._row_start + length) if vertical else self._row_start
 
     @property
     def sampling_rate(self) -> int:
@@ -96,10 +92,7 @@ class _CrossSection:
     def _is_valid_sample_rate(self, sampling_rate) -> bool:
         """Check if sampling rate meets minimum constraints."""
 
-        return sampling_rate <= ((self._col_end - self._col_start) * 2)
-
-    def change_axis(self):
-        self.vertical = not self.vertical
+        return sampling_rate <= ((self._end - self._start) * 2)
 
     @property
     def data(self):
@@ -107,13 +100,8 @@ class _CrossSection:
 
     @data.setter
     def data(self, data: np.ndarray):
-        """Set the data property."""
-
-        if self.vertical:
-            self._data = data[self._row_start:self._row_end, self._col_start]
-        else:
-            self._data = data[self._row_start, self._col_start: self._col_end]
-        self._data = self._data[self._data != self._nodata_value]
+        """Abstract setter."""
+        pass
 
     @property
     def nodata_value(self):
@@ -124,12 +112,46 @@ class _CrossSection:
         self._nodata_value = nodata_value
 
     @property
-    def row_start(self):
-        return self._row_start
+    def start(self):
+        return self._start
 
     @property
-    def col_start(self):
-        return self._col_start
+    def end(self):
+        return self._end
+
+
+class CrossSectionVertical(_CrossSection):
+
+    def __init__(self, index: int, start: int, length: int = 0):
+        super().__init__(index, start, length)
+
+    @property
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, data: np.ndarray):
+        """Set the data property."""
+
+        self._data = data[self.start:self._end, self._index]
+        self._data = self._data[self._data != self._nodata_value]
+
+
+class CrossSectionHorizontal(_CrossSection):
+
+    def __init__(self, index: int, start: int, length: int = 0):
+        super().__init__(index, start, length)
+
+    @property
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, data: np.ndarray):
+        """Set the data property."""
+
+        self._data = data[self._index, self.start:self.end]
+        self._data = self._data[self._data != self._nodata_value]
 
 
 class _HighFrequencyCell:
