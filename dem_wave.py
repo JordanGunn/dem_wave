@@ -1,9 +1,12 @@
 # system imports
 import os
 import pywt
+import tqdm
 import rasterio
 import numpy as np
+from typing import Union
 import matplotlib.pyplot as plt
+from osgeo import gdal, gdal_array
 from scipy.signal import butter, filtfilt
 
 # user imports
@@ -12,16 +15,17 @@ from const import *
 
 class _PlotData:
 
-    def __init__(self, row, col, coeffs, data, levels):
-        self.row = row
-        self.col = col
+    def __init__(self, index: int, coeffs: np.ndarray, data: np.ndarray, levels: int, direction: str):
+        self.index = index
         self.levels = levels
         self.coeffs = coeffs
         self.data = data
+        self.direction = direction
 
 
 class _CrossSection:
 
+    KEY = ""
     SAMPLING_RATE_DEFAULT = 1000
     CUTOFF_FREQUENCY_DEFAULT = 0.50
 
@@ -36,6 +40,7 @@ class _CrossSection:
         self._data = None
         self._index = index
         self._start = start
+        self._offset = 0
         self._nodata_value = NODATA
         self._end = (self._start + length) if length else length
         self._sampling_rate = self.SAMPLING_RATE_DEFAULT
@@ -60,6 +65,20 @@ class _CrossSection:
 
         self._nyquist_sampling_rate = 0.5 * self._sampling_rate
         self._normal_cutoff = self._cutoff_frequency / self.nyquist_sampling_rate
+
+    @property
+    def index(self) -> int:
+
+        """Get the sampling rate property."""
+
+        return self._index
+
+    @property
+    def offset(self) -> int:
+
+        """Get the sampling rate property."""
+
+        return self._offset
 
     @property
     def nyquist_sampling_rate(self) -> float:
@@ -120,7 +139,9 @@ class _CrossSection:
         return self._end
 
 
-class CrossSectionVertical(_CrossSection):
+class CrossSectionVt(_CrossSection):
+
+    KEY = "vt"
 
     def __init__(self, index: int, start: int, length: int = 0):
         super().__init__(index, start, length)
@@ -133,11 +154,18 @@ class CrossSectionVertical(_CrossSection):
     def data(self, data: np.ndarray):
         """Set the data property."""
 
-        self._data = data[self.start:self._end, self._index]
-        self._data = self._data[self._data != self._nodata_value]
+        data = data[self.start:self._end, self._index]
+        data_half = data[:int(data.size / 2)]
+        if data_half[0] == self.nodata_value:
+            data_half_nodata = data_half[data_half != self._nodata_value]
+            self._offset = data_half_nodata.size - data_half.size
+
+        self._data = data[data != self._nodata_value]
 
 
-class CrossSectionHorizontal(_CrossSection):
+class CrossSectionHz(_CrossSection):
+
+    KEY = "hz"
 
     def __init__(self, index: int, start: int, length: int = 0):
         super().__init__(index, start, length)
@@ -150,8 +178,12 @@ class CrossSectionHorizontal(_CrossSection):
     def data(self, data: np.ndarray):
         """Set the data property."""
 
-        self._data = data[self._index, self.start:self.end]
-        self._data = self._data[self._data != self._nodata_value]
+        data = data[self._index, self.start:self.end]
+        data_half = data[:int(data.size / 2)]
+        if data_half[0] == self.nodata_value:
+            data_half_nodata = data_half[data_half != self._nodata_value]
+            self._offset = data_half_nodata.size - data_half.size
+        self._data = data[data != self._nodata_value]
 
 
 class _HighFrequencyCell:
@@ -176,6 +208,9 @@ class _HighFrequencyCell:
 
 class DemWave:
 
+    THRESHOLD_COEFF_L4 = 0.35
+    MAX_ENERGY_L4 = 0.50
+
     def __init__(self, file: str, wavelet_type: str, decomp_levels: int):
         """
 
@@ -188,10 +223,12 @@ class DemWave:
         self.file = file
         self.length = -1
         self.plot_data = []
-        self.cross_sections = []
+        self.cross_sections = {"hz": [], "vt": []}
         self.high_frequencies = []
         self.wavelet_type = wavelet_type
         self.decomp_levels = decomp_levels
+        self._max_energy = self.MAX_ENERGY_L4
+        self._threshold_coeff = self.THRESHOLD_COEFF_L4
 
         try:
             with rasterio.open(file) as dem:
@@ -209,69 +246,89 @@ class DemWave:
 
     def write_result(self, name: str = "", outdir: str = ""):
 
-        # copy the dataset information
         # Open the source dataset
-        with rasterio.open(self.file, 'r') as src_ds:
-            # Create a new dataset using the profile of the source dataset
-            profile = src_ds.profile
+        src_ds = gdal.Open(self.file, gdal.GA_ReadOnly)
 
-            # You can modify or add additional metadata here if needed
-            # For example:
-            # profile['transform'] = ...
+        # Create the destination dataset
+        if not name:
+            name = os.path.basename(self.file)
+            name = name.split(".")[0] + "_waveform.tif"
 
-            # Create the destination dataset
-            if not name:
-                name = os.path.basename(self.file)
-                name = name.split(".")[0] + "_waveform.tif"
+        name = os.path.join(outdir, name)
+        driver = gdal.GetDriverByName("GTiff")
+        width = src_ds.RasterXSize
+        height = src_ds.RasterYSize
+        num_bands = src_ds.RasterCount
+        data_type = src_ds.GetRasterBand(1).DataType
+        dst_ds = driver.Create(name, width, height, num_bands, data_type)
 
-            name = os.path.join(outdir, name)
-            with rasterio.open(name, 'w', **profile) as dst_ds:
-                # Copy the data from the source to the destination
-                data = src_ds.read(BAND_FIRST)
-                data = (data * 0) + NODATA  # set everything to nodata value
-                for freq in self.high_frequencies:
-                    data[freq.row, freq.col] = freq.value
+        gdal_array.CopyDatasetInfo(src_ds, dst_ds)
+        # Copy the data from the source to the destination
+        band = dst_ds.GetRasterBand(BAND_FIRST)
+        data = band.ReadAsArray()
+        data = (data * 0) + NODATA  # set everything to nodata value
+        freqs = tqdm.tqdm(self.high_frequencies, desc="Writing high frequency pixels")
+        for freq in freqs:
+            data[freq.row, freq.col] = freq.value
 
-                dst_ds.write(data, BAND_FIRST)
+        print(f"\n  Writing results to {name} ...")
+        band.WriteArray(data)
+        gdal.SieveFilter(band, None, band, 2)
 
-
+        src_ds = None   # gdal requires this to free up memory and flush changes
+        dst_dst = None  # gdal requires this to free up memory and flush changes
 
     def add_cross_section(self, cross_section: _CrossSection):
-        self.cross_sections.append(cross_section)
 
-    def get_cross_sections(self, index, width):
-
-        if not self.cross_sections:
-            return None
+        if isinstance(cross_section, CrossSectionVt):
+            self.cross_sections["vt"].append(cross_section)
+        elif isinstance(cross_section, CrossSectionHz):
+            self.cross_sections["hz"].append(cross_section)
         else:
-            return self.cross_sections[index:(index + width)]
+            raise ValueError("Argument cross_section must derived from parent class CrossSection")
 
-    def set_cross_sections(self, length: int = -1, vertical: bool = False):
+    def get_cross_sections(self, index: int = 0, width: int = -1, direction: str = "hz") -> Union[list, None]:
 
-        length = self.width if (length < 0) else length
+        sections = None
+        if self.cross_sections:
+            if width == -1:
+                sections = self.cross_sections[direction][index:]
+            else:
+                sections = self.cross_sections[direction][index:(index + width)]
 
-        col_start = 0
-        for row in range(self.height):
-            cs = _CrossSection(
-                row_start=row, col_start=col_start,
-                length=length, vertical=vertical
-            )
+        return sections
+
+    def set_cross_sections(self, length: int = -1, direction: str = "hz"):
+
+        is_hz = (direction == "hz")
+        along, entire = (self.height, self.width) if is_hz else (self.width, self.height)
+        length = entire if length <= 0 else length
+        section_obj = CrossSectionHz if is_hz else CrossSectionVt
+
+        start = 0
+        for index in range(along):
+            cs = section_obj(index=index, start=start, length=length)
             cs.data = self.data
             self.add_cross_section(cs)
 
-    def find_high_frequency(self, cross_sections: list[_CrossSection] = None):
-
-        cross_sections = self.cross_sections if (not cross_sections) else cross_sections
+    def find_high_frequency(self, cross_sections: list[_CrossSection]):
 
         if not cross_sections:
             raise ValueError("ERROR: 'self.cross_sections' not set.")
 
-        for cross_section in cross_sections:
+        ignored = []
 
+        sections = tqdm.tqdm(cross_sections, desc="Checking for high frequency areas in cross sections")
+        for cross_section in sections:
             wavelet = self.wavelet_type
             level = self.decomp_levels
-            data = self.high_pass_filter(cross_section)
-            if data.size == 0:  # check if there is no data in the cross section
+
+            try:
+                data = self.high_pass_filter(cross_section)
+                if data.size == 0:  # check if there is no data in the cross section
+                    continue
+            except ValueError:
+                ignored.append(cross_section)
                 continue
 
             # Perform wavelet packet decomposition
@@ -281,22 +338,25 @@ class DemWave:
                 continue
 
             max_coeffs_last = np.abs(max(coeffs[-1]))
-            threshold = np.abs(max(coeffs[-1])) * 0.25
+            threshold = np.abs(max(coeffs[-1])) * self._threshold_coeff
             self._store_plot_data(coeffs, cross_section, data, level)
-
-            if max_coeffs_last >= 0.5:
+            if max_coeffs_last >= self._max_energy:
                 high_freq_indices = np.where(np.abs(coeffs[-1]) > threshold)[0]
                 time_points_high_freq = high_freq_indices * (len(data) / len(coeffs[-1]))
 
                 if time_points_high_freq.size > 0:
-                    high_freqs = [
-                        _HighFrequencyCell(
-                            cross_section.row_start, int(point), FREQUENCY_FLAGGED
-                        ) for point in time_points_high_freq.tolist()
-                    ]
+                    high_freqs = []
+                    for p in time_points_high_freq.tolist():
+                        p = int(p)
+                        ind = cross_section.index
+                        args = (ind - cross_section.offset, p) \
+                            if cross_section.KEY == "hz" else (p - cross_section.offset, ind)
+                        cell = _HighFrequencyCell(*args, FREQUENCY_FLAGGED)
+                        high_freqs.append(cell)
+
                     self.high_frequencies.extend(high_freqs)
 
-    def _store_plot_data(self, coeffs, cross_section, data, level):
+    def _store_plot_data(self, coeffs, cross_section: _CrossSection, data, level):
         """
 
         :param coeffs:
@@ -306,22 +366,19 @@ class DemWave:
         :return:
         """
 
-        row = cross_section.row_start
-        col = cross_section.col_start
+        index = cross_section.index
 
-        plot_row = row if not cross_section.vertical else 0
-        plot_col = col if cross_section.vertical else 0
-        plot_data = _PlotData(plot_row, plot_col, coeffs, data, level)
+        plot_data = _PlotData(index, coeffs, data, level, cross_section.KEY)
         self.plot_data.append(plot_data)
 
     @staticmethod
     def write_plot(plot_data: _PlotData, name="", outdir=""):
 
-        row = plot_data.row
-        col = plot_data.col
+        index = plot_data.index
         coeffs = plot_data.coeffs
         data = plot_data.data
         level = plot_data.levels
+        outdir = os.path.join(outdir, plot_data.direction)
 
         # Plot the original signal
         plt.figure(figsize=(10, 6))
@@ -339,7 +396,10 @@ class DemWave:
             plt.legend()
             level_plots.append(plt)
 
-        name = name + f"_row{row}_col{col}.png"
+        along = "row" if plot_data.direction == "hz" else "col"
+
+        os.makedirs(outdir, exist_ok=True)
+        name = name + f"_{along}{index}.png"
         out = os.path.join(outdir, name)
 
         plt.savefig(out)
@@ -367,23 +427,26 @@ class DemWave:
 def main():
 
     # create a DemWave object (intialize with {filepath, "db1", "4"})
-    dem_wave = DemWave(TestDemFile.NOISY, WaveletType.DB2, decomp_levels=4)
+    dem_wave = DemWave(TestDemFile.SRC_NOISY, WaveletType.DB2, decomp_levels=4)
 
     # compute all the cross-sections horizontally
-    dem_wave.set_cross_sections(vertical=False)
+    dem_wave.set_cross_sections(direction=CrossSectionKey.HZ)
+    dem_wave.set_cross_sections(direction=CrossSectionKey.VT)
 
-    # extract the first 5 cross-sections from all the cross-sections
-    sections = dem_wave.get_cross_sections(0, 100)
+    # extract the first 100 cross-sections from all the cross-sections
+    hz_sections = dem_wave.get_cross_sections(direction=CrossSectionKey.HZ)
+    vt_sections = dem_wave.get_cross_sections(direction=CrossSectionKey.VT)
 
-    dem_wave.find_high_frequency(sections)
+    # dem_wave.find_high_frequency(hz_sections)
+    dem_wave.find_high_frequency(vt_sections)
 
     outdir = r"C:\Users\LETHIER\work\waveform\data\dem\out"
 
     dem_wave.write_result(outdir=outdir)
 
-    plot_out = r"C:\Users\LETHIER\work\waveform\data\cross_sections"
-    for plot in dem_wave.plot_data:
-        dem_wave.write_plot(plot, outdir=plot_out)
+    # plot_out = r"C:\Users\LETHIER\work\waveform\data\cross_sections"
+    # for plot in dem_wave.plot_data:
+    #     dem_wave.write_plot(plot, outdir=plot_out)
 
 
 if __name__ == "__main__":

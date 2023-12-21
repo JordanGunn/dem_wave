@@ -5,12 +5,19 @@ INIT_DEFAULT = -1
 FREQUENCY_FLAGGED = 1
 
 
+class CrossSectionKey:
+    VT = "vt"
+    HZ = "hz"
+    ALL = "all"
+
+
 class TestDemFile:
 
     """Default file paths for testing input data."""
 
     NOISY = r"C:\Users\LETHIER\work\waveform\data\dem\known_data\bc_092g025_1m_clipped.tif"
     CLEAN_1m = r"C:\Users\LETHIER\work\waveform\data\dem\known_data\bc_092g025_1m_clipped_clean.tif"
+    SRC_NOISY = r"C:\Users\LETHIER\work\waveform\data\dem\source\bc_092g025_xl1m_utm10_170713.tif"
     CLEAN_15cm = r"C:\Users\LETHIER\work\waveform\data\dem\known_data\bc_092g025_15cm_clipped_clean.tif"
 
 
