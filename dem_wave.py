@@ -1,10 +1,14 @@
 # system imports
 import os
+import tkinter.dialog
+
 import pywt
 import tqdm
+import glob
 import rasterio
 import numpy as np
 from typing import Union
+from tkinter import filedialog
 import matplotlib.pyplot as plt
 from osgeo import gdal, gdal_array
 from scipy.signal import butter, filtfilt
@@ -267,7 +271,7 @@ class DemWave:
         band = dst_ds.GetRasterBand(BAND_FIRST)
         data = band.ReadAsArray()
         data = (data * 0) + NODATA  # set everything to nodata value
-        freqs = tqdm.tqdm(self.high_frequencies, desc="Writing high frequency pixels")
+        freqs = tqdm.tqdm(self.high_frequencies, desc="  Writing high frequency pixels")
         for freq in freqs:
             data[freq.row, freq.col] = freq.value
 
@@ -318,7 +322,7 @@ class DemWave:
 
         ignored = []
 
-        sections = tqdm.tqdm(cross_sections, desc="Checking for high frequency areas in cross sections")
+        sections = tqdm.tqdm(cross_sections, desc="  Checking for high frequency areas in cross sections")
         for cross_section in sections:
             wavelet = self.wavelet_type
             level = self.decomp_levels
@@ -424,10 +428,18 @@ class DemWave:
         return filtered_signal
 
 
-def main():
+def run_dem_wave(file: str, outdir: str):
+
+    """
+    Runnable for main().
+
+    :param file:
+    :param outdir:
+    :return:
+    """
 
     # create a DemWave object (intialize with {filepath, "db1", "4"})
-    dem_wave = DemWave(TestDemFile.SRC_NOISY, WaveletType.DB2, decomp_levels=4)
+    dem_wave = DemWave(file, WaveletType.DB2, decomp_levels=4)
 
     # compute all the cross-sections horizontally
     dem_wave.set_cross_sections(direction=CrossSectionKey.HZ)
@@ -439,10 +451,21 @@ def main():
 
     # dem_wave.find_high_frequency(hz_sections)
     dem_wave.find_high_frequency(vt_sections)
-
-    outdir = r"C:\Users\LETHIER\work\waveform\data\dem\out"
+    dem_wave.find_high_frequency(hz_sections)
 
     dem_wave.write_result(outdir=outdir)
+
+
+def main():
+
+    idir = filedialog.askdirectory(title="Choose directory containing DEM files (*.tif).")
+    odir = filedialog.askdirectory(title="Choose output directory.")
+    flist = glob.glob(f'{idir}/*.tif')
+
+    n = len(flist)
+    for i, f in enumerate(flist):
+        print(f"Processing input file {i + 1}/{n}")
+        run_dem_wave(file=f, outdir=odir)
 
     # plot_out = r"C:\Users\LETHIER\work\waveform\data\cross_sections"
     # for plot in dem_wave.plot_data:
